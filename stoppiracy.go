@@ -32,19 +32,21 @@ const (
 
 // Result structure for final JSON output
 type DomainResult struct {
-	Name        string   `json:"name"`
-	Logo        string   `json:"logo"`
-	Email       []string `json:"email"`
-	Matched     []string `json:"matched"`
-	LastUpdated string   `json:"last_updated"`
+	Name         string   `json:"name"`
+	Logo         string   `json:"logo"`
+	InternalLink []string `json:"internal_link"`
+	Email        []string `json:"email"`
+	Matched      []string `json:"matched"`
+	LastUpdated  string   `json:"last_updated"`
 }
 
 // Combined result for a domain
 type DomainData struct {
-	URL      string
-	Keywords []string
-	Favicons []string
-	Emails   []string
+	URL           string
+	Keywords      []string
+	Favicons      []string
+	Emails        []string
+	InternalLinks []string
 }
 
 // Email extraction patterns
@@ -302,10 +304,10 @@ func extractEmailsAndLinks(targetURL, baseURL string, keywords []string, client 
 
 	html := string(body)
 	emails, links := extractEmailsAndLinksFromHTML(html, targetURL, baseURL)
-	
+
 	// Extract keywords from HTML content
 	matchedKeywords := checkKEYBOARD(html, keywords)
-	
+
 	return matchedKeywords, emails, links, nil
 }
 
@@ -324,10 +326,11 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 	domainURL = ensureProtocol(domainURL, client)
 
 	data := &DomainData{
-		URL:      domainURL,
-		Keywords: []string{},
-		Favicons: []string{},
-		Emails:   []string{},
+		URL:           domainURL,
+		Keywords:      []string{},
+		Favicons:      []string{},
+		Emails:        []string{},
+		InternalLinks: []string{},
 	}
 
 	// Step 1: Fetch main page ONCE
@@ -347,6 +350,7 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 	// Step 2: Extract keywords from HTML (no additional request)
 	matchedKeywords := checkKEYBOARD(htmlContent, keywords)
 	keywordSet := make(map[string]bool)
+	mainPageMatched := len(matchedKeywords) > 0
 	for _, keyword := range matchedKeywords {
 		keywordSet[keyword] = true
 	}
@@ -379,6 +383,7 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 		var wg sync.WaitGroup
 		emailChan := make(chan string, len(links))
 		keywordChan := make(chan string, len(links))
+		internalLinkChan := make(chan string, len(links))
 		semaphore := make(chan struct{}, maxWorkers)
 
 		for _, link := range links {
@@ -388,11 +393,14 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 				semaphore <- struct{}{}
 				defer func() { <-semaphore }()
 
+				linkMatched := false
+
 				// Check keywords in URL path
 				linkLower := strings.ToLower(l)
 				for _, keyword := range keywords {
 					if strings.Contains(linkLower, strings.ToLower(keyword)) {
 						keywordChan <- keyword
+						linkMatched = true
 					}
 				}
 
@@ -404,9 +412,17 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 						emailChan <- email
 					}
 					// Send keywords found in HTML
+					if len(linkKeywords) > 0 {
+						linkMatched = true
+					}
 					for _, keyword := range linkKeywords {
 						keywordChan <- keyword
 					}
+				}
+
+				// If link matched keywords, send it to the channel
+				if linkMatched {
+					internalLinkChan <- l
 				}
 			}(link)
 		}
@@ -415,6 +431,7 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 			wg.Wait()
 			close(emailChan)
 			close(keywordChan)
+			close(internalLinkChan)
 		}()
 
 		emailSet := make(map[string]bool)
@@ -425,6 +442,12 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 		// Collect keywords from internal links
 		for keyword := range keywordChan {
 			keywordSet[keyword] = true
+		}
+
+		// Collect matched internal links
+		internalLinkSet := make(map[string]bool)
+		for link := range internalLinkChan {
+			internalLinkSet[link] = true
 		}
 
 		// Add unique emails
@@ -441,11 +464,31 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 				data.Emails = append(data.Emails, email)
 			}
 		}
+
+		// Convert internal link set to slice
+		for link := range internalLinkSet {
+			data.InternalLinks = append(data.InternalLinks, link)
+		}
 	}
 
 	// Convert keyword set to slice
 	for keyword := range keywordSet {
 		data.Keywords = append(data.Keywords, keyword)
+	}
+
+	// Add base domain URL to internal links if keywords matched on main page
+	if mainPageMatched {
+		// Check if domainURL is not already in the list to avoid duplicates
+		found := false
+		for _, existingLink := range data.InternalLinks {
+			if existingLink == domainURL {
+				found = true
+				break
+			}
+		}
+		if !found {
+			data.InternalLinks = append(data.InternalLinks, domainURL)
+		}
 	}
 
 	return data, nil
@@ -454,6 +497,68 @@ func processDomain(domainURL string, keywords []string, timeout time.Duration, m
 // getCurrentDate returns current date in YYYY-MM-DD format
 func getCurrentDate() string {
 	return time.Now().Format("2006-01-02")
+}
+
+// updateJSONFile atomically updates the JSON file with a new result
+func updateJSONFile(outputFile string, newResult DomainResult, mutex *sync.Mutex) error {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	var results []DomainResult
+
+	// Read existing file if it exists
+	if _, err := os.Stat(outputFile); err == nil {
+		// File exists, read and parse it
+		data, err := os.ReadFile(outputFile)
+		if err != nil {
+			return fmt.Errorf("error reading existing JSON file: %v", err)
+		}
+
+		// Parse existing JSON (handle empty file)
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &results); err != nil {
+				// If parse fails, start fresh
+				results = []DomainResult{}
+			}
+		}
+	}
+
+	// Check if result with same URL already exists and update it, otherwise append
+	found := false
+	for i, result := range results {
+		if result.Name == newResult.Name {
+			results[i] = newResult
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		results = append(results, newResult)
+	}
+
+	// Marshal to JSON with indentation
+	jsonData, err := json.MarshalIndent(results, "", "    ")
+	if err != nil {
+		return fmt.Errorf("error marshaling JSON: %v", err)
+	}
+
+	// Write to temporary file first for atomic operation
+	tmpFile := outputFile + ".tmp"
+	err = os.WriteFile(tmpFile, jsonData, 0644)
+	if err != nil {
+		return fmt.Errorf("error writing temporary file: %v", err)
+	}
+
+	// Atomically rename temp file to output file
+	err = os.Rename(tmpFile, outputFile)
+	if err != nil {
+		// Clean up temp file on error
+		os.Remove(tmpFile)
+		return fmt.Errorf("error renaming temporary file: %v", err)
+	}
+
+	return nil
 }
 
 // loadKeywords loads keywords from either a file or a comma-separated string
@@ -551,12 +656,19 @@ func main() {
 		return
 	}
 
+	// Initialize output file with empty JSON array if it doesn't exist
+	if _, err := os.Stat(*output); os.IsNotExist(err) {
+		emptyJSON := []byte("[]\n")
+		if err := os.WriteFile(*output, emptyJSON, 0644); err != nil {
+			logrus.Warnf("Warning: Could not initialize output file: %v", err)
+		}
+	}
+
 	// Process domains
 	timeoutDuration := time.Duration(*timeout) * time.Second
-	var results []DomainResult
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, *concurrency)
-	resultsMutex := &sync.Mutex{}
+	fileMutex := &sync.Mutex{}
 
 	for _, url := range urls {
 		wg.Add(1)
@@ -588,18 +700,26 @@ func main() {
 				emails = []string{"-"}
 			}
 
-			// Create result
-			result := DomainResult{
-				Name:        data.URL,
-				Logo:        logo,
-				Email:       emails,
-				Matched:     data.Keywords,
-				LastUpdated: getCurrentDate(),
+			// Prepare internal links
+			internalLinks := data.InternalLinks
+			if len(internalLinks) == 0 {
+				internalLinks = []string{}
 			}
 
-			resultsMutex.Lock()
-			results = append(results, result)
-			resultsMutex.Unlock()
+			// Create result
+			result := DomainResult{
+				Name:         data.URL,
+				Logo:         logo,
+				InternalLink: internalLinks,
+				Email:        emails,
+				Matched:      data.Keywords,
+				LastUpdated:  getCurrentDate(),
+			}
+
+			// Update JSON file immediately
+			if err := updateJSONFile(*output, result, fileMutex); err != nil {
+				logrus.Warnf("Error updating JSON file for %s: %v", domainURL, err)
+			}
 
 			logrus.Infof("Processed: %s", domainURL)
 		}(url)
@@ -607,17 +727,6 @@ func main() {
 
 	wg.Wait()
 
-	// Write results to JSON file
-	jsonData, err := json.MarshalIndent(results, "", "    ")
-	if err != nil {
-		logrus.Fatalf("Error marshaling JSON: %v", err)
-	}
-
-	err = os.WriteFile(*output, jsonData, 0644)
-	if err != nil {
-		logrus.Fatalf("Error writing output file: %v", err)
-	}
-
-	logrus.Infof("Results saved to: %s", *output)
-	logrus.Infof("Processed %d domain(s)", len(results))
+	// All results have been written to JSON file immediately as they were processed
+	logrus.Infof("All domains processed. Results saved to: %s", *output)
 }

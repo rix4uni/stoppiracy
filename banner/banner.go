@@ -5,7 +5,7 @@ import (
 )
 
 // prints the version message
-const version = "v0.0.1"
+const version = "v0.0.2"
 
 func PrintVersion() {
 	fmt.Printf("Current stoppiracy version %s\n", version)
@@ -23,4 +23,3 @@ func PrintBanner() {
 `
 	fmt.Printf("%s\n%60s\n\n", banner, "Current stoppiracy version "+version)
 }
-
