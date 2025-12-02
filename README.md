@@ -28,9 +28,9 @@ go install github.com/rix4uni/stoppiracy@latest
 
 ### Download Prebuilt Binaries
 ```
-wget https://github.com/rix4uni/stoppiracy/releases/download/v0.0.2/stoppiracy-linux-amd64-0.0.2.tgz
-tar -xvzf stoppiracy-linux-amd64-0.0.2.tgz
-rm -rf stoppiracy-linux-amd64-0.0.2.tgz
+wget https://github.com/rix4uni/stoppiracy/releases/download/v0.0.3/stoppiracy-linux-amd64-0.0.3.tgz
+tar -xvzf stoppiracy-linux-amd64-0.0.3.tgz
+rm -rf stoppiracy-linux-amd64-0.0.3.tgz
 mv stoppiracy ~/go/bin/stoppiracy
 ```
 Or download [binary release](https://github.com/rix4uni/stoppiracy/releases) for your platform.
@@ -45,6 +45,7 @@ cd stoppiracy; go install
 ```yaml
 Usage of stoppiracy:
   -c, --concurrency int   Number of concurrent workers (default 50)
+      --matched           Only save results that have at least one matched keyword
   -o, --output string     Path to the output JSON file (default "programs.json")
       --silent            Silent mode
   -t, --timeout int       Timeout for each HTTP request in seconds (default 30)

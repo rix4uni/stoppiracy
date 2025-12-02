@@ -500,7 +500,7 @@ func getCurrentDate() string {
 }
 
 // updateJSONFile atomically updates the JSON file with a new result
-func updateJSONFile(outputFile string, newResult DomainResult, mutex *sync.Mutex) error {
+func updateJSONFile(outputFile string, newResult DomainResult, matchedOnly bool, mutex *sync.Mutex) error {
 	mutex.Lock()
 	defer mutex.Unlock()
 
@@ -523,18 +523,42 @@ func updateJSONFile(outputFile string, newResult DomainResult, mutex *sync.Mutex
 		}
 	}
 
-	// Check if result with same URL already exists and update it, otherwise append
+	// If matchedOnly flag is set, filter existing results to only include those with matches
+	if matchedOnly {
+		filteredResults := []DomainResult{}
+		for _, result := range results {
+			if len(result.Matched) > 0 {
+				filteredResults = append(filteredResults, result)
+			}
+		}
+		results = filteredResults
+	}
+
+	// Check if result with same URL already exists
 	found := false
+	foundIndex := -1
 	for i, result := range results {
 		if result.Name == newResult.Name {
-			results[i] = newResult
 			found = true
+			foundIndex = i
 			break
 		}
 	}
 
-	if !found {
-		results = append(results, newResult)
+	if found {
+		// Update existing result
+		if matchedOnly && len(newResult.Matched) == 0 {
+			// Remove the result if matchedOnly is set and it has no matches
+			results = append(results[:foundIndex], results[foundIndex+1:]...)
+		} else {
+			// Update the result
+			results[foundIndex] = newResult
+		}
+	} else {
+		// Add new result only if it has matches (when matchedOnly is set) or always (when not set)
+		if !matchedOnly || len(newResult.Matched) > 0 {
+			results = append(results, newResult)
+		}
 	}
 
 	// Marshal to JSON with indentation
@@ -611,6 +635,7 @@ func main() {
 	silent := pflag.Bool("silent", false, "Silent mode")
 	versionFlag := pflag.Bool("version", false, "Print the version of the tool and exit")
 	verbose := pflag.Bool("verbose", false, "Enable verbose logging")
+	matchedOnly := pflag.Bool("matched", false, "Only save results that have at least one matched keyword")
 
 	pflag.Parse()
 
@@ -717,7 +742,7 @@ func main() {
 			}
 
 			// Update JSON file immediately
-			if err := updateJSONFile(*output, result, fileMutex); err != nil {
+			if err := updateJSONFile(*output, result, *matchedOnly, fileMutex); err != nil {
 				logrus.Warnf("Error updating JSON file for %s: %v", domainURL, err)
 			}
 
